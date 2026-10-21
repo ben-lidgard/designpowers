@@ -37,6 +37,7 @@ Ask for anything that is missing, in one message:
 BOARD:   [Pinterest board URL]
 FIGMA:   [Figma design file URL — or "new file"]
 COLUMNS: [default: chosen from pin count — see Step 5]
+ORDER:   [board order (default) — or grouped by colour and tone]
 ```
 
 If the board has **sections**, ask whether to include them. Section pins live at `<board-url>/<section-slug>/` and are captured the same way, one section at a time, in board order.
@@ -87,7 +88,22 @@ window.__dpList ??= [...window.__dpPins.values()].sort((a, b) => a.order - b.ord
 window.__dpList.slice(0, 10).map(p => p.id + ' ' + p.src.replace('https://i.pinimg.com/', '')).join('\n')
 ```
 
-Run every chunk (`slice(0,10)`, `slice(10,20)`, …) in a single `browser_batch`, then write the combined list to `list.txt` in the scratch folder.
+Run every chunk (`slice(0,10)`, `slice(10,20)`, …) in a single `browser_batch`, then write the combined list to `list.txt` in the scratch folder. Do not try the clipboard instead — `navigator.clipboard` from the page hangs the tab.
+
+**Verify the transcription.** On a large board, copying hundreds of lines out of tool results is where typos creep in. In the same batch, have the page compute a checksum of the exact text you will write:
+
+```js
+const t = window.__dpList.map(p => p.id + ' ' + p.src.replace('https://i.pinimg.com/', '')).join('\n') + '\n';
+let s = 0; for (let i = 0; i < t.length; i++) s = (s * 31 + t.charCodeAt(i)) % 1000000007;
+({ len: t.length, sum: s })
+```
+
+Then compute the same over `list.txt` with Python (`for ch in text: s = (s*31 + ord(ch)) % 1000000007`). Length and sum must both match before you download anything.
+
+Two things that look like problems but are not:
+
+- Video pins have a thumbnail path (`videos/thumbnails/originals/…`) instead of an image path. They download fine and show as their poster frame.
+- Below the board, Pinterest shows a "Find some ideas for this board" carousel. Those items are not `/pin/` links, so the collector never picks them up.
 
 The selectors above match Pinterest's markup at the time of writing. If a run collects 0 pins on a board that visibly has pins, inspect one pin with `read_page` and update the selectors — do not guess.
 
@@ -97,7 +113,7 @@ For each pin, build the full-resolution URL. Pinterest image URLs follow the pat
 
 1. Try `/originals/` in place of the size segment.
 2. If that returns 403/404 (the original often has a different extension), try `/736x/` with the same path.
-3. If an original is over 10 MB (the Figma upload limit), use `/736x/` instead. Animated GIFs are the usual culprit — and the 736px version of a GIF is served as **`.jpg`**, not `.gif` (`736x/<path>/<hash>.jpg`). Figma shows image fills as a still frame anyway.
+3. If an original is over 10 MB (the Figma upload limit), use `/736x/` instead. Animated GIFs and very large PNGs are the usual culprits — and the 736px version is always served as **`.jpg`**, whatever the original format (`736x/<path>/<hash>.jpg`). Figma shows image fills as a still frame anyway.
 
 Download with numbered filenames so board order survives. Do not name a shell variable `path` — in zsh it is tied to `PATH`, and every command after it fails with "command not found":
 
@@ -111,7 +127,10 @@ while read id src; do
     || echo "FAILED $n $src"
 done < list.txt
 find . -size +10M
+ls [0-9][0-9][0-9]-* | wc -l
 ```
+
+Count files with `[0-9][0-9][0-9]-*`, not `0*` — past pin 99 the filenames start with `1` or `2`, and a `0*` glob silently undercounts. For boards over ~100 pins, run the `curl` calls in the background, about 12 at a time.
 
 Then read each image's real dimensions (macOS):
 
@@ -140,7 +159,8 @@ Choose the column count from the number of pins unless the user gave one:
 |------|---------|
 | 1–8 | 3 |
 | 9–30 | 4 |
-| 31+ | 5 |
+| 31–100 | 5 |
+| 101+ | 10 — at 5 columns a 250-pin board is ~16,000px tall; offer 8 or 10 |
 
 Structure (one `use_figma` call):
 
@@ -156,9 +176,36 @@ Structure (one `use_figma` call):
 - Column width: 240 px. Gap between columns and between images: the spacing variable from Step 4.
 - Place pins in board order, each one into the **currently shortest** column. This is how Pinterest builds its own grid, and it keeps the board order readable left to right.
 - Rectangles have no fill until the image arrives. Name each one `Pin <nnn> · <pin-id>` so every image can be traced back to its source pin.
-- Return the rectangle IDs from the script **in pin order** — Step 6 depends on it.
+- After building, read the rectangles back and return `<pin number>:<node id>` for each (parse the number from the layer name). Rectangle IDs are not sequential once there are several columns or groups, so map files to slots by pin number, never by creation order.
 
 Do not use `createImageAsync` — it is not supported through the Figma MCP.
+
+#### Optional: group by colour and tone
+
+When the user asks for it, measure each image's average colour and group before building. No extra libraries are needed on macOS — `sips` shrinks each image to a 24×24 BMP, and Python's standard library can read BMP pixels:
+
+```bash
+sips -s format bmp -z 24 24 "$f" --out "bmp/${f%.*}.bmp"
+```
+
+Parse the BMP (pixel offset at byte 10, width/height at 18, bits per pixel at 28; rows are padded to 4 bytes and stored bottom-up), convert each pixel from sRGB to CIE Lab, and average L, a and b. Chroma is `hypot(a, b)` and hue is `atan2(b, a)` in degrees.
+
+Groups, in this order, each sorted light to dark by L:
+
+| Group | Rule |
+|-------|------|
+| Light neutrals | chroma < 7, L ≥ 65 |
+| Sand & gold | hue 60–100° |
+| Terracotta & brown | hue 30–60° |
+| Reds & burgundy | hue ≥ 330° or < 30° |
+| Greens | hue 100–200° |
+| Blues & violets | hue 200–330° |
+| Mid greys | chroma < 7, 30 ≤ L < 65 |
+| Charcoal & black | chroma < 7, L < 30 |
+
+Build each group as its own masonry block — a horizontal auto-layout of the columns, named after the group — and stack the blocks in a vertical auto-layout with a larger gap between groups than between images, so the groups read as separate. Keep the original board number in each layer name.
+
+Average colour is a blunt measure: a small bright mark on a large grey background reads as grey. Tell the user this, and that misplaced images can be dragged between groups.
 
 ### Step 6: Upload the Images
 
@@ -169,15 +216,16 @@ Call `upload_assets` with:
 - `nodeIds`: the rectangle IDs for those pins, in the same order
 - `scaleMode`: `FILL` (rectangles already match the images' proportions, so nothing is cropped)
 
-The returned `uploads` are in the same order as `nodeIds`, so the Nth URL takes the Nth file. POST them in parallel (10 at a time is fine), with the MIME type read from the file:
+Each returned upload carries a `targetNodeId`. Pair every URL with its file **through that node ID** (node → pin number → file), not by position, and write `<node id> <upload uuid>` lines. Then POST them in parallel (10 at a time), with the MIME type read from the file, and check each response:
 
-```bash
-paste -d' ' <(ls 0*) urls.txt | while read f u; do
-  curl -s -o /dev/null -w "${f%%-*} %{http_code}\n" -X POST \
-    -H "Content-Type: $(file -b --mime-type "$f")" --data-binary @"$f" "$u" &
-  while [ $(jobs -r | wc -l) -ge 10 ]; do sleep 0.2; done
-done; wait
+```python
+# node2file.json maps node id -> filename, built from the Step 5 read-back
+url = f'https://mcp.figma.com/mcp/upload/{uuid}/submit?scaleMode=FILL&currentPageId={page}'
+# curl -X POST -H "Content-Type: <mime>" --data-binary @<file> <url>
+# response JSON: {"success": true, "placedOnNodeId": "<node id>", ...}
 ```
+
+Treat an upload as done only when the status is 200 **and** `placedOnNodeId` equals the node you meant. Pairing by node ID and checking the response means a typo in a transcribed URL fails loudly instead of putting an image in the wrong slot.
 
 Send **raw bytes**, not multipart. A multipart upload renames the layer to the filename, which overwrites the `Pin <nnn> · <pin-id>` names. Each URL is single-use and expires after 10 minutes.
 
