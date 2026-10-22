@@ -1,9 +1,10 @@
 ---
-name: pinterest-to-figma
+name: moodboard-creator
 description: Use when the user shares a Pinterest board URL and wants its images in Figma — captures every pin on the board through the user's Chrome session, then places the images in a masonry auto-layout frame in a Figma file. Also use when inspiration-scouting receives a Pinterest board as reference material
+argument-hint: <pinterest-board-url> [figma-url | new]
 ---
 
-# Pinterest to Figma
+# Moodboard Creator
 
 A Pinterest board is where a lot of designers collect their references. This skill brings a board into Figma as a working mood board: every pin, at full resolution, in a masonry auto-layout frame that keeps each image's proportions and the board's order.
 
@@ -31,7 +32,18 @@ The images belong to other people. This skill is for internal reference only —
 
 ### Step 1: Confirm the Inputs
 
-Ask for anything that is missing, in one message:
+Read the inputs from the arguments first. The skill is usually run as:
+
+```
+/moodboard-creator <pinterest-board-url> [<figma-url> | new]
+```
+
+- Accept the two URLs in either order. Tell them apart by host: `pinterest.*` (any country domain, e.g. `au.pinterest.com`) is the board; `figma.com/design/...` is the destination. The word `new` means create a new file.
+- If the Figma URL has a `node-id`, that node (usually a page) is the target. Without one, use the file's current page.
+- A `figma.com/board/...` (FigJam) or `/slides/...` link is not a design file — say so and ask for a design file instead.
+- Anything else in the arguments (e.g. "10 columns", "group by colour") sets the matching option below.
+
+Then ask only for what is still missing, in one message:
 
 ```
 BOARD:   [Pinterest board URL]
